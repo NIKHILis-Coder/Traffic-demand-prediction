@@ -9,13 +9,15 @@ __pycache__/
 
 # Environments
 .env
-.venv
+.venv/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
 mlpr/
+*env/
+*venv/
 
 # OS metadata
 .DS_Store
