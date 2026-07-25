@@ -1,0 +1,31 @@
+# Core data handling
+pandas==3.0.3
+numpy==2.4.6
+
+# Plotting (EDA notebooks)
+matplotlib==3.10.9
+seaborn==0.13.2
+
+# Stats / preprocessing
+scipy==1.17.1
+scikit-learn==1.8.0
+statsmodels==0.14.6
+
+# Geospatial decoding of geohash -> lat/lon (step04)
+pygeohash==3.3.0
+
+# Models
+xgboost==3.2.0
+lightgbm==4.6.0
+catboost==1.2.10
+
+# Hyperparameter search (step10)
+optuna>=3.6
+
+# Model persistence
+joblib==1.5.3
+
+# Running the notebooks
+jupyter==1.1.1
+notebook==7.5.6
+ipykernel==7.2.0

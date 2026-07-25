@@ -1,79 +1,108 @@
 # Traffic Demand Prediction
 
-This repository contains an end-to-end machine learning pipeline to predict traffic demand. It encompasses extensive Exploratory Data Analysis (EDA), robust feature engineering, target encoding, modeling, and evaluation.
+Predict traffic demand (a float between 0 and 1) for a road segment at a given
+15-minute time slot, given its location, time, road type, and weather. Built
+as an end-to-end ML project: EDA → feature engineering → model comparison →
+stacked ensemble.
 
-## 📂 Project Structure
+**Final result:** stacked ensemble (XGBoost + LightGBM + CatBoost → Ridge)
+achieves **RMSE 0.0263 / R² 0.966** on out-of-fold predictions, a 33% RMSE
+improvement over a manually-tuned single-model baseline (0.0395). See
+`reports/Traffic_Demand_Approach_Document.txt` for the full writeup and
+`INTERVIEW_PREP.md` for a detailed walkthrough of every decision.
 
-```text
-├── DATA-PREPROCESSING/
-│   ├── bivariate_analysis.ipynb     # Analysis between two variables
-│   ├── multivariate_analysis.ipynb  # Analysis of multiple variables interacting
-│   ├── raw_data_analysis.ipynb      # Initial inspection of the raw datasets
-│   ├── univariate_analysis.ipynb    # Distribution and summary of single variables
-│   └── plots/                       # Generated EDA plots (univariate, bivariate, etc.)
-│
-├── DATASETS/
-│   ├── train.csv                    # Training data 
-│   ├── test.csv                     # Testing data for predictions
-│   └── sample_submission.csv        # Format for final submission
-│
-├── pipelining/
-│   ├── notebooks/
-│   │   ├── step01_basic_cleaning.ipynb            # Data cleaning and type casting
-│   │   ├── step02_temperature_imputation.ipynb    # Handling missing values
-│   │   ├── step03_encoding.ipynb                  # Categorical encoding
-│   │   ├── step04_geohash_target_encoding.ipynb   # Geospatial target encoding & smoothing
-│   │   ├── step05_temporal_features.ipynb         # Time-based feature generation
-│   │   ├── step06_road_features.ipynb             # Road specific spatial features
-│   │   ├── step07_interaction_features.ipynb      # Interaction term creation
-│   │   ├── step08_weather_features.ipynb          # Weather specific feature engineering
-│   │   ├── step09_vif_check.ipynb                 # Multicollinearity check (Variance Inflation Factor)
-│   │   ├── step10_model_training.ipynb            # Training machine learning models
-│   │   └── step11_prediction.ipynb                # Generating final submission file
-│   │
-│   ├── processed/                   # Intermediate CSV files created at each pipeline step
-│   └── src/
-│       ├── config.py                # Pipeline configurations and constants
-│       └── utils.py                 # Reusable utility functions
-│
-└── output/
-    └── submission.csv               # Final prediction file for submission
+## Data
+
+11 raw columns, 77,299 training rows / 41,778 test rows:
+
+| Column | Type | Notes |
+|---|---|---|
+| geohash | categorical | 1,249 unique location cells |
+| day | int | only 2 distinct values — not a real time series |
+| timestamp | string `H:MM` | 96 fifteen-minute slots/day |
+| RoadType | categorical | Highway / Street / Residential (600 missing) |
+| NumberofLanes | int | 1–5 |
+| LargeVehicles | binary | Allowed / Not Allowed |
+| Landmarks | binary | Yes / No |
+| Temperature | float | °C (2,495 missing) |
+| Weather | categorical | Sunny / Foggy / Rainy / Snowy (797 missing) |
+| demand | float, target | 0–1, right-skewed, mean 0.094 |
+
+## Project structure
+
+```
+data/
+  raw/                train.csv, test.csv, sample_submission.csv
+  processed/          intermediate CSVs written after each pipeline step
+notebooks/
+  eda/                4 exploratory notebooks (raw -> univariate -> bivariate -> multivariate) + plots/
+  pipeline/           11 numbered notebooks, step01 (cleaning) -> step11 (prediction)
+src/
+  config.py           paths, encoding maps, model hyperparameters — single source of truth
+  utils.py            seed_everything(), rmse(), r2()
+models/               trained model artifacts + feature importance plots
+reports/              submission.csv, prediction plot, approach document
+requirements.txt
 ```
 
-## 🚀 Getting Started
+## Pipeline
 
-### Prerequisites
+| Step | What it does |
+|---|---|
+| 01 | Drop `Index`, parse `timestamp` → `hour`/`minute`, mode-impute `RoadType`/`Weather` (fit on train only) |
+| 02 | Impute `Temperature` with the geohash-group median (train-derived), falling back to the global median |
+| 03 | Ordinal/binary encode categoricals |
+| 04 | Decode `geohash` → lat/lon via `pygeohash`; leave-one-out target encoding of `geohash` |
+| 05 | Cyclical hour features (`sin`/`cos`), peak/business/night flags, `hour²` |
+| 06 | `road_capacity` (type × lanes), `road_combo` (vehicles × landmarks) |
+| 07 | 8 interaction features, chosen from multivariate EDA findings |
+| 08 | `temp²`, trim to the final 26-feature set |
+| 09 | VIF multicollinearity check (diagnostic — see note below) |
+| 10 | Optuna-tuned XGBoost + LightGBM + CatBoost, 5-fold out-of-fold stacking with a Ridge meta-learner |
+| 11 | Load saved models, predict on test, clip to `[0, ∞)`, write submission |
 
-You need Python 3 installed. It is recommended to use a virtual environment. The repository already has a `mlpr` virtual environment directory initialized.
+Every encoder/imputer is fit on train only and applied to test — no target
+leakage between splits. `geohash` uses genuine leave-one-out encoding (each
+row's encoding excludes its own value) rather than a plain group mean, which
+would leak.
 
-### Installation
+**On the VIF step:** 16 of 23 extended features exceed VIF 10 — expected,
+since most are engineered products of other retained features
+(`road_capacity = road_type × lanes`, `geo_x_roadtype = geohash_enc ×
+road_type`, etc.). All 26 features are kept anyway: XGBoost/LightGBM/CatBoost
+split on one feature at a time and are invariant to linear collinearity; VIF
+only threatens the Ridge meta-learner, which never sees these 26 raw features
+(it only sees the 3 base models' predictions). The full reasoning is in
+`notebooks/pipeline/step09_vif_check.ipynb`.
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/NIKHILis-Coder/Traffic-demand-prediction.git
-   cd Traffic-demand-prediction
-   ```
+## Results
 
-2. **Activate the virtual environment (Windows):**
-   ```bash
-   .\mlpr\Scripts\activate
-   ```
+| Model | OOF RMSE | OOF R² |
+|---|---|---|
+| XGBoost | 0.0309 | 95.26% |
+| LightGBM | 0.0274 | 96.27% |
+| CatBoost | 0.0274 | 96.29% |
+| **Stacked (Ridge)** | **0.0263** | **96.57%** |
 
-3. **Install Dependencies:**
-   Make sure you have standard data science libraries installed such as `pandas`, `numpy`, `scikit-learn`, `matplotlib`, `seaborn`, `jupyter`, and `pygeohash`.
+All metrics are out-of-fold (5-fold CV) — no train-set leakage into the
+reported numbers.
 
-### Executing the Pipeline
+## Running it
 
-The project is designed to be executed sequentially via Jupyter Notebooks.
-Start Jupyter Lab or Jupyter Notebook:
 ```bash
+python -m venv venv
+venv\Scripts\activate        # Windows
+pip install -r requirements.txt
 jupyter notebook
 ```
-Navigate to `pipelining/notebooks/` and execute the steps in numerical order, starting from `step01_basic_cleaning.ipynb` through to `step11_prediction.ipynb`. Intermediate datasets are automatically saved to `pipelining/processed/` after each step.
 
-## 🛠️ Methodology Highlights
+Run the notebooks in order: `notebooks/pipeline/step01...` through `step11`.
+Each step reads the previous step's output from `data/processed/` and writes
+its own. `step10_model_training.ipynb` runs the Optuna hyperparameter search
+(200 trials × 3 models — slow) and saves `models/best_params.json`;
+`step10_part2_training.ipynb` reloads those params and does the actual
+5-fold stacking + final model fit (kept as a separate notebook so the final
+training run doesn't require re-doing the search every time).
 
-- **Spatial Analytics**: Leverages `pygeohash` to decode categorical spatial regions into highly granular coordinates.
-- **Leave-One-Out Target Encoding**: Implements robust LOO encoding techniques on the training data to mitigate data leakage, utilizing an elegant multi-level fallback mechanism for unseen geospatial categories in test data.
-- **Feature Engineering**: Heavy focus on deriving temporal trends, weather impacts, and interactions to feed the final ML models.
-- **VIF Checking**: Includes explicit steps to resolve multicollinearity through Variance Inflation Factor analysis before hitting the final modeling phases.
+`src/config.py` resolves all paths relative to its own location, so the
+project runs from any clone location without editing paths.

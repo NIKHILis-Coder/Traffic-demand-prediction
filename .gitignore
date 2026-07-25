@@ -1,14 +1,18 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual Environments
+# Virtual environments
 mlpr/
 venv/
-.env/
 .venv/
-env/
 
-# Jupyter Notebook checkpoints
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
 .ipynb_checkpoints/
+
+# CatBoost auto-generated training logs (regenerated on every run)
+catboost_info/
+
+# OS cruft
+.DS_Store
+Thumbs.db

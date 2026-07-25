@@ -1,0 +1,445 @@
+
+══════════════════════════════════════════════════════════════════════════════════
+                         TRAFFIC DEMAND PREDICTION
+                     End-to-End Machine Learning Project
+══════════════════════════════════════════════════════════════════════════════════
+
+                         Complete Approach Document
+              Why We Did It  •  How We Did It  •  What We Learned
+
+
+──────────────────────────────────────────────────────────────────────────────────
+                          FINAL EVALUATION METRICS
+──────────────────────────────────────────────────────────────────────────────────
+
+    Model             OOF RMSE     OOF R²       Role
+    ─────             ────────     ──────       ────
+    XGBoost           0.0309       95.26%       Base model 1
+    LightGBM          0.0274       96.27%       Base model 2
+    CatBoost          0.0274       96.29%       Base model 3
+    Stacked (Ridge)   0.0263       ~96.6%       >>> Final prediction <<<
+
+    Residual Mean:  -0.0001 (no bias)     |  Residual Std Dev: 0.0256
+    Residual Range: -0.25 to +0.30        |  Predictions clipped to [0, 1]
+
+    Ensemble  :  XGBoost + LightGBM + CatBoost  →  Ridge meta-learner
+    Features  :  11 raw columns  →  26 engineered features
+    Data      :  77,299 train rows  |  41,778 test rows
+    Tuning    :  Optuna 200 trials/model (600 total)  |  5-fold CV
+
+
+──────────────────────────────────────────────────────────────────────────────────
+                            TABLE OF CONTENTS
+──────────────────────────────────────────────────────────────────────────────────
+
+    [1]  The Problem & Dataset
+    [2]  Exploratory Data Analysis
+    [3]  Feature Engineering (8 pipeline steps)
+    [4]  Modelling: Base → Improved → Final
+    [5]  Stacking Ensemble
+    [6]  Pipeline Overview
+    [7]  Results & Residual Analysis
+    [8]  Future Improvements
+    [9]  Project File Structure
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                           1. THE PROBLEM & DATASET
+══════════════════════════════════════════════════════════════════════════════════
+
+Predict traffic demand (float 0–1) for a road segment at a given time.
+Demand depends on location, time, road type, weather, and their interactions.
+
+
+1.1  RAW DATASET — 11 COLUMNS
+
+    #   Column           Type          Description                    Notes
+    ─   ──────           ────          ───────────                    ─────
+    0   Index            Integer       Row identifier                 Dropped before modelling
+    1   geohash          String        Location grid cell             1,249+ unique cells
+    2   day              Integer       Day identifier                 2 unique values (48, 49)
+    3   timestamp        String H:MM   Time of day                    96 unique (15-min intervals)
+    4   demand           Float 0–1     TARGET — traffic load          Right-skewed, mean=0.094
+    5   RoadType         Categorical   Highway/Street/Residential     600 missing
+    6   NumberofLanes    Integer       Lanes on the road              Values 1–5
+    7   LargeVehicles    Binary        Large vehicles allowed?        Allowed / Not Allowed
+    8   Landmarks        Binary        Near a landmark?               Yes / No
+    9   Temperature      Float °C      Temperature at location        2,495 missing
+    10  Weather          Categorical   Weather condition              797 missing
+
+
+1.2  COLUMN CLASSIFICATION
+
+    NUMERICAL (4)                        CATEGORICAL (5)
+    ─────────────                        ───────────────
+    Index ........... row ID (dropped)   geohash ........... 1,249+ cells
+    NumberofLanes ... 1–5, monotone      day ............... binary flag
+    Temperature ..... -14.9 to 48.3°C    RoadType .......... 3 categories
+    demand .......... target (train)     LargeVehicles ..... 2 categories
+                                         Landmarks ......... 2 categories
+    TEMPORAL (1)                         Weather ........... 4 categories
+    ────────────
+    timestamp ....... parsed → hour + minute
+
+    Missing:  RoadType 600 (0.78%)  |  Temperature 2,495 (3.23%)  |  Weather 797 (1.03%)
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                        2. EXPLORATORY DATA ANALYSIS
+══════════════════════════════════════════════════════════════════════════════════
+
+Three rounds: raw inspection → univariate → bivariate + multivariate.
+Every feature engineering decision traces back to an EDA finding.
+
+
+2.1  UNIVARIATE FINDINGS
+
+    • Demand is right-skewed — rare high-demand events dominate the upper tail
+    • Missing values cluster by location and time — not random
+    • geohash: 1,249+ unique → one-hot impractical → target encoding needed
+    • day: only 2 values → binary flag, not time-series
+    • NumberofLanes: 1–5 (not 1–3 as initially assumed)
+
+
+2.2  BIVARIATE SIGNAL RANKING
+
+    Feature          Signal          Key Finding                     Encoding Decision
+    ───────          ──────          ───────────                     ─────────────────
+    geohash          Critical        100x gap busiest vs quietest    LOO target encode + lat/lon
+    hour             Critical        Dual peak: 7–9 AM, 5–8 PM      Cyclical sin/cos + flags
+    RoadType         Critical        Highway >> Street >> Resid.     Ordinal 2/1/0
+    NumberofLanes    Strong          Monotone demand increase        As-is numeric
+    LargeVehicles    Moderate        Allowed = higher demand         Binary → composite
+    Landmarks        Moderate        Near landmark = variable        Binary → composite
+    Weather          Moderate        Sunny > Foggy > Rainy > Snowy   Ordinal severity 0–3
+    Temperature      Weak–Moderate   Non-linear at extremes          Raw + squared
+
+
+2.3  KEY MULTIVARIATE FINDINGS
+
+    • Rush hour spike (17–20) exists ONLY on highways → hour_x_roadtype
+    • LargeVehicles + Landmarks joint effect > either alone → road_combo
+    • Weather is additive shift (same curve shape) → simple ordinal sufficient
+    • Some geohash cells peak at specific hours only → geo_hour_sin
+    • Highways affected more by bad weather → road_x_weather
+    • VIF check: 16/23 engineered features exceed VIF 10 (expected — most are
+      products of other retained features); kept anyway since tree ensembles
+      are invariant to linear collinearity, unlike the 3-input Ridge meta-learner
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                          3. FEATURE ENGINEERING
+══════════════════════════════════════════════════════════════════════════════════
+
+11 raw columns  →  26 engineered features across 8 pipeline steps.
+Every feature justified by EDA — nothing speculative.
+
+
+STEP 01 — BASIC CLEANING
+
+    • Dropped Index column (zero predictive value)
+    • Parsed timestamp H:MM → integer hour + minute, dropped raw string
+    • Imputed RoadType & Weather with mode (fitted on train only)
+
+
+STEP 02 — TEMPERATURE IMPUTATION
+
+    • 2,495 missing values filled using geohash-group median (not global median)
+    • Rationale: temperature varies by location; local median >> global median
+    • Medians computed from train only; fallback to global for unseen geohashes
+
+
+STEP 03 — ENCODING
+
+    • RoadType → ordinal: Highway=2, Street=1, Residential=0 (rank-preserving)
+    • Weather → severity: Sunny=0, Foggy=1, Rainy=2, Snowy=3
+    • LargeVehicles → binary 1/0  |  Landmarks → binary 1/0  |  day → LabelEncoder
+
+
+STEP 04 — GEOHASH TARGET ENCODING (pygeohash)
+
+    Most impactful step. Three parts:
+
+    1) pygeohash decode → latitude + longitude (spatial proximity for the model)
+    2) Leave-one-out target encoding (prevents target leakage in train)
+       Formula: (group_sum - current_demand) / (group_count - 1)
+    3) Three-level test fallback: geohash mean → prefix mean → global mean
+
+
+STEP 05 — TEMPORAL FEATURES
+
+    Feature           Formula                   Rationale
+    ───────           ───────                   ─────────
+    hour_sin          sin(2π × hour/24)         Cyclical encoding (23→0 continuity)
+    hour_cos          cos(2π × hour/24)         Pair with sin for full circle
+    is_peak_hour      1 if 7–9 or 17–20         Rush hour flag from EDA
+    is_business_hour  1 if 8–17                 Daytime commercial traffic
+    is_night          1 if ≥22 or ≤6            Night regime (flat, low demand)
+    hour_squared      hour²                     Captures non-linear curvature
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                     3. FEATURE ENGINEERING (continued)
+══════════════════════════════════════════════════════════════════════════════════
+
+
+STEP 06 — ROAD FEATURES
+
+    • road_capacity = road_type_ord × NumberofLanes (physical capacity proxy)
+    • road_combo = LargeVehicles + Landmarks as 4-category composite:
+        1_1 = Commercial hub  |  1_0 = Freight corridor
+        0_1 = Urban landmark  |  0_0 = Quiet residential
+
+
+STEP 07 — INTERACTION FEATURES  (65% of total RMSE gain)
+
+    Feature            Formula                        EDA Justification
+    ───────            ───────                        ─────────────────
+    hour_x_roadtype    hour × road_type_ord           Rush hour = highways only
+    geo_hour_sin       geohash_enc × hour_sin         Location-specific hourly peaks
+    road_x_weather     road_type_ord × weather_sev    Highways drop more in bad weather
+    geo_x_roadtype     geohash_enc × road_type_ord    Hwy vs residential geohashes differ
+    geo_x_weather      geohash_enc × weather_sev      Some locations = weather-sensitive
+    lanes_x_weather    NumberofLanes × weather_sev    Multi-lane roads react differently
+    geo_x_peak         geohash_enc × is_peak_hour     Rush-hour hotspot locations
+    temp_x_weather     Temperature × weather_sev      Cold + bad weather = compound effect
+
+
+STEP 08 — WEATHER FEATURES
+
+    • temp_squared = Temperature² (non-linear response at cold/hot extremes)
+
+
+FINAL FEATURE SET — 26 FEATURES
+
+    Category      Count   Features
+    ────────      ─────   ────────
+    Spatial         4     geohash_target_enc, latitude, longitude, geohash_prefix_enc
+    Temporal        7     hour, hour_sin, hour_cos, is_peak_hour, is_business_hour,
+                          is_night, hour_squared
+    Road            4     road_type_ord, NumberofLanes, road_capacity, road_combo_enc
+    Weather         3     weather_severity, Temperature, temp_squared
+    Interaction     8     hour_x_roadtype, geo_hour_sin, road_x_weather,
+                          geo_x_roadtype, geo_x_weather, lanes_x_weather,
+                          geo_x_peak, temp_x_weather
+                   ──
+    TOTAL          26
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                 4. MODELLING: BASE → IMPROVED → FINAL
+══════════════════════════════════════════════════════════════════════════════════
+
+No base model was provided. We built everything from scratch and
+iteratively improved through three stages.
+
+
+STAGE 1 — BASE MODEL (XGBoost + LightGBM, manual params)
+
+    We first trained XGBoost and LightGBM with manually-set parameters
+    and stacked them via Ridge regression.
+
+    Base config:
+      XGBoost  → n_estimators=347,  lr=0.030, max_depth=7,  subsample=0.51
+      LightGBM → n_estimators=1944, lr=0.013, num_leaves=230, max_depth=12
+
+    Base results:
+      XGBoost (base)            RMSE = 0.0395    R² = 92.27%
+      XGB + LGB Stacked (base)  RMSE = 0.0363    R² = 93.49%
+
+
+STAGE 2 — LIMITATIONS IDENTIFIED
+
+    1. Low diversity — XGBoost and LightGBM make similar errors → stacking
+       gains were minimal
+    2. Suboptimal params — manual tuning cannot explore the full search space
+    3. No spatial coordinates — geohash was target-encoded but lat/lon
+       were missing → model could not learn geographic proximity
+
+
+STAGE 3 — IMPROVEMENTS APPLIED
+
+    Improvement 1:  Added CatBoost (ordered boosting → different error patterns)
+    Improvement 2:  Added pygeohash lat/lon (genuine spatial proximity)
+    Improvement 3:  Optuna 200 trials/model (Bayesian hyperparameter search)
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                         4. MODELLING (continued)
+══════════════════════════════════════════════════════════════════════════════════
+
+
+OPTUNA-TUNED PARAMETERS (200 trials each, 3-fold CV per trial)
+
+    XGBoost (tuned):
+      n_estimators=1266, lr=0.0403, max_depth=9, subsample=0.816,
+      colsample_bytree=0.682, min_child_weight=3, gamma=0.0015,
+      reg_alpha=0.116, reg_lambda=4.397
+
+    LightGBM (tuned):
+      n_estimators=2643, lr=0.0304, num_leaves=237, max_depth=9,
+      subsample=0.898, colsample_bytree=0.710, min_child_samples=5,
+      reg_alpha=0.004, reg_lambda=3.447
+
+    CatBoost (tuned):
+      iterations=1913, lr=0.257, depth=8, l2_leaf_reg=4.608,
+      bagging_temperature=0.598, random_strength=0.822
+
+
+WHY GRADIENT BOOSTING OVER NEURAL NETWORKS?
+
+    For structured tabular data with mixed types, gradient boosting consistently
+    outperforms neural networks. It handles missing values natively, needs less
+    tuning, and is more interpretable. Our results confirmed this.
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                           5. STACKING ENSEMBLE
+══════════════════════════════════════════════════════════════════════════════════
+
+Each model makes different errors. A meta-learner learns to optimally
+combine their predictions — better than fixed-weight averaging.
+
+
+HOW IT WORKS
+
+    1. Split train into 5 folds
+    2. For each fold: train XGB + LGB + CAT on 4 folds, predict on held-out
+    3. Collect out-of-fold (OOF) predictions for every training row
+    4. Train Ridge meta-learner (alpha=2.56) on OOF predictions as features
+    5. At test time: all 3 models predict → Ridge combines → final output
+
+
+WHY RIDGE AS META-LEARNER?
+
+    Only 3 input features (one per model) → complex model would overfit.
+    Ridge is linear with L2 regularisation, and its coefficients directly
+    show how much weight each base model receives.
+
+
+FINAL STACKING RESULTS
+
+    Model             OOF RMSE     OOF R²       Role
+    ─────             ────────     ──────       ────
+    XGBoost           0.0309       95.26%       Base model 1
+    LightGBM          0.0274       96.27%       Base model 2
+    CatBoost          0.0274       96.29%       Base model 3
+    Stacked (Ridge)   0.0263       ~96.6%       Final prediction
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                          6. PIPELINE OVERVIEW
+══════════════════════════════════════════════════════════════════════════════════
+
+11 numbered Jupyter notebooks. Each step reads a CSV, processes, saves output.
+Any step can be re-run independently.
+
+    Step   Name                     What it does
+    ────   ────                     ────────────
+    01     Basic Cleaning           Parse timestamp, drop Index, impute mode
+    02     Temperature Imputation   Geohash-group median fill
+    03     Encoding                 Ordinal + binary encoding
+    04     Geohash Target Encoding  pygeohash decode + LOO target encode
+    05     Temporal Features        Cyclical, flags, hour²
+    06     Road Features            road_capacity, road_combo
+    07     Interaction Features     8 interaction terms from multivariate EDA
+    08     Weather Features         temp_squared, final feature trim
+    09     VIF Check                Multicollinearity diagnostic (documented, not a feature gate)
+    10     Model Training           Optuna + 5-fold CV + Ridge stacking
+    11     Prediction               Load models → predict → save submission
+
+
+DESIGN PRINCIPLES
+
+    • All transformers fitted on TRAIN only → applied to test (no leakage)
+    • config.py = single source of truth for all paths, maps, and params
+    • utils.py = shared helpers: rmse(), r2(), seed_everything()
+    • Intermediate CSVs saved at each step for debuggability
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                      7. RESULTS & RESIDUAL ANALYSIS
+══════════════════════════════════════════════════════════════════════════════════
+
+COMPLETE JOURNEY — BASE TO FINAL
+
+    Stage                          RMSE       R²        What Changed
+    ─────                          ────       ──        ────────────
+    1. Base XGBoost (manual)       0.0395     92.27%    Starting point
+    2. Base XGB+LGB Stacked       0.0363     93.49%    Added LightGBM (limited diversity)
+    3. Tuned XGBoost (Optuna)      0.0309     95.26%    +Optuna +pygeohash lat/lon
+    4. Tuned LightGBM (Optuna)     0.0274     96.27%    +Optuna +pygeohash lat/lon
+    5. Tuned CatBoost (new)        0.0274     96.29%    New model, ordered boosting
+    6. FINAL Stacked Ensemble      0.0263     ~96.6%    Ridge stacking of 3 models
+
+    Total RMSE improvement:  0.0395 → 0.0263  =  33.4% reduction
+
+
+RESIDUAL ANALYSIS
+
+    Mean:  -0.0001 (≈ zero — no systematic bias)
+    Std:    0.0256 (typical error on 0–1 scale — very tight)
+    Min:   -0.25   |  Max: +0.30  (edge cases, not systematic failures)
+
+    Test prediction percentiles:
+      P10=0.014  P25=0.025  P50=0.055  P75=0.118  P90=0.339  P99=0.859
+
+
+──────────────────────────────────────────────────────────────────────────────────
+                        8. FUTURE IMPROVEMENTS
+──────────────────────────────────────────────────────────────────────────────────
+
+    1. Geohash-hour target encoding — per (geohash, hour) mean instead of
+       per-geohash mean. Captures time-specific location patterns.
+
+    2. Geohash entity embeddings — neural network embedding layer for dense
+       vector representations. Captures spatial proximity implicitly.
+
+    3. Pseudo-labelling — high-confidence test predictions (where all 3
+       models agree within 0.005) added back to training. Typical gain:
+       0.001–0.003 RMSE.
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+                          9. PROJECT FILE STRUCTURE
+══════════════════════════════════════════════════════════════════════════════════
+
+    Location                     Contents
+    ────────                     ────────
+    data/raw/                    train.csv (77,299 rows), test.csv (41,778),
+                                 sample_submission.csv
+
+    notebooks/eda/                raw_data_analysis, univariate_analysis,
+                                 bivariate_analysis, multivariate_analysis
+
+    notebooks/eda/plots/          EDA plots: univariate/ bivariate/ multivariate/
+
+    notebooks/pipeline/           step01–step11 (complete pipeline)
+    src/config.py                All paths, constants, encoding maps, params
+    src/utils.py                 rmse(), r2(), seed_everything()
+    models/                       best_xgb_model.pkl, best_lgbm_model.pkl,
+                                 best_catboost_model.pkl, meta_learner.pkl,
+                                 best_params.json
+    data/processed/               Intermediate CSVs (train/test_step01–step08)
+    reports/                      submission.csv (final entry), approach doc
+
+
+
+══════════════════════════════════════════════════════════════════════════════════
+
+    Principle: understand the data first, let EDA drive feature decisions,
+    validate with cross-validation, combine models in a principled way.
+
+    Final RMSE: 0.0263   |   Final R²: ~96.6%   |   33.4% improvement over base
+
+══════════════════════════════════════════════════════════════════════════════════

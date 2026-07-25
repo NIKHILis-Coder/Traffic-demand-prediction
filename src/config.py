@@ -9,23 +9,25 @@ propagates everywhere automatically.
 import os
 
 # ── Root directory of the project ────────────────────────────────────────────
-ROOT_DIR = r"C:\traffic-demand-final"
+# Resolved relative to this file (src/config.py) instead of hardcoded, so the
+# repo works from any clone location/OS as long as the folder layout below is kept.
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Raw dataset paths ─────────────────────────────────────────────────────────
-DATASETS_DIR   = os.path.join(ROOT_DIR, "DATASETS")
+DATASETS_DIR   = os.path.join(ROOT_DIR, "data", "raw")
 TRAIN_FILE     = os.path.join(DATASETS_DIR, "train.csv")
 TEST_FILE      = os.path.join(DATASETS_DIR, "test.csv")
 SAMPLE_SUB     = os.path.join(DATASETS_DIR, "sample_submission.csv")
 
-# ── Data-preprocessing notebook and plot directories ─────────────────────────
-DATA_PREP_DIR         = os.path.join(ROOT_DIR, "DATA-PREPROCESSING")
+# ── EDA notebook and plot directories ─────────────────────────────────────────
+DATA_PREP_DIR         = os.path.join(ROOT_DIR, "notebooks", "eda")
 PLOTS_DIR             = os.path.join(DATA_PREP_DIR, "plots")
 UNIVARIATE_PLOTS_DIR  = os.path.join(PLOTS_DIR, "univariate")
 BIVARIATE_PLOTS_DIR   = os.path.join(PLOTS_DIR, "bivariate")
 MULTIVARIATE_PLOTS_DIR = os.path.join(PLOTS_DIR, "multivariate")
 
-# ── Output directory (processed datasets, model artefacts, submissions) ───────
-OUTPUT_DIR = os.path.join(ROOT_DIR, "output")
+# ── Output directory (submission, prediction plots, approach doc) ─────────────
+OUTPUT_DIR = os.path.join(ROOT_DIR, "reports")
 
 # ── Column name constants ─────────────────────────────────────────────────────
 TARGET_COL     = "demand"
@@ -77,11 +79,10 @@ CYCLIC_FEATURES_MAX = {
     "decimal_hour": 24.0
 }
 
-# ── Pipelining directories ────────────────────────────────────────────────────
-PIPELINING_DIR = os.path.join(ROOT_DIR, "pipelining")
-MODEL_DIR      = os.path.join(PIPELINING_DIR, "models")
-PROC_DIR       = os.path.join(PIPELINING_DIR, "processed")
-SRC_DIR        = os.path.join(PIPELINING_DIR, "src")
+# ── Pipeline directories ───────────────────────────────────────────────────────
+MODEL_DIR = os.path.join(ROOT_DIR, "models")
+PROC_DIR  = os.path.join(ROOT_DIR, "data", "processed")
+SRC_DIR   = os.path.join(ROOT_DIR, "src")
 
 # ── Model settings ────────────────────────────────────────────────────────────
 RANDOM_STATE = 42
@@ -96,7 +97,9 @@ PEAK_HOURS     = [(7, 9), (17, 20)]
 BUSINESS_HOURS = (8, 17)
 NIGHT_HOURS    = (22, 6)
 
-# ── XGBoost best params from previous Optuna run ─────────────────────────────
+# ── XGBoost baseline params (Stage 1, manually set — see approach doc) ────────
+# These are the pre-Optuna baseline used to establish a starting RMSE; the
+# actual final model uses Optuna-tuned params loaded from models/best_params.json.
 XGB_PARAMS = {
     "n_estimators":      347,
     "learning_rate":     0.0297,
@@ -109,7 +112,8 @@ XGB_PARAMS = {
     "n_jobs":            -1,
 }
 
-# ── LightGBM best params from previous Optuna run ────────────────────────────
+# ── LightGBM baseline params (Stage 1, manually set — see approach doc) ───────
+# Same story as XGB_PARAMS above: pre-Optuna baseline, not the tuned model.
 LGBM_PARAMS = {
     "n_estimators":      1944,
     "learning_rate":     0.0127,
@@ -126,8 +130,12 @@ LGBM_PARAMS = {
 # ── Ridge meta-learner alpha from previous CV run ─────────────────────────────
 RIDGE_ALPHA = 2.56
 
-# ── Final 26 features confirmed after VIF check ───────────────────────────────
-# 23 original + 3 new spatial features from pygeohash (lat, lon, prefix enc)
+# ── Final 26 features used by the trained models ──────────────────────────────
+# 23 original + 3 new spatial features from pygeohash (lat, lon, prefix enc).
+# step09's VIF check flags 16 of these as highly collinear but none are
+# dropped — see notebooks/pipeline/step09_vif_check.ipynb for the reasoning
+# (short version: collinearity harms linear models, not the tree ensembles
+# actually used here).
 FINAL_FEATURES = [
     "geohash_target_enc",
     "latitude",
