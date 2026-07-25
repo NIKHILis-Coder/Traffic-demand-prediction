@@ -13,6 +13,13 @@ __pycache__/
 # CatBoost auto-generated training logs (regenerated on every run)
 catboost_info/
 
+# Intermediate pipeline outputs (train_step01.csv .. test_step08.csv, etc.) —
+# fully regenerable by rerunning notebooks/pipeline/step01..step08 against
+# data/raw/. Committing every step's before/after copy of a 77k-row dataset
+# bloated this repo by ~150MB across the project's history for no benefit;
+# data/raw/ is the source of truth and the notebooks are the transform.
+data/processed/
+
 # OS cruft
 .DS_Store
 Thumbs.db
